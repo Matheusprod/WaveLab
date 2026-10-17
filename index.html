@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WaveLab —  Visualizer Waveforms</title>
+
+  
+   <link rel="stylesheet" href="style.css">
+   
+</head>
+
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">WAVELAB <span>/ VISUALIZER WAVEFORMS</span></div>
+      <div class="pill">LOCAL • FREE</div>
+    </header>
+    <h1>Your beat.<br>One clean waveform.</h1>
+    <p class="intro">Create a minimalist waveform for your beats.</p>
+    <div class="layout">
+      <section class="panel">
+        <div class="preview-head"><span id="previewFormat">PREVIEW · 9:16</span> <span id="previewLabel">Waiting for audio.</span></div>
+        <div class="stage"><canvas id="visual" width="720" height="1280"></canvas></div>
+        <div class="controls">
+          <button id="play" class="primary" disabled>▶ Play</button>
+          <button id="restart" disabled>↺ Reestart</button>
+          <button id="export" disabled>● Record</button>
+          <button id="download" disabled>⬇ Download video</button>
+          <span class="time" id="time">00:00 / 00:00</span>
+        </div>
+
+        <div class="progress">
+          <div id="bar"></div>
+        </div>
+
+        <div class="status" id="status">Import your beat to start.</div>
+
+      </section>
+
+      <aside class="panel">
+
+        <div class="drop">
+          <strong>1. Pick your beat.</strong>
+          <small>WAV ou MP3. The audio is processed in your browser.</small>
+          <label class="filebtn" for="audioFile">＋ Import audio</label>
+          <input id="audioFile" type="file" accept="audio/*">
+          <div id="audioName" class="note">No archives selected.</div>
+        </div>
+
+        <div class="drop">
+          <strong>2. Pick a background image (optional)</strong>
+          <small>Tip: It could be the cover of the beat!</small>
+          <label class="filebtn" for="bgFile">＋ Import image</label>
+          <input id="bgFile" type="file" accept="image/*">
+          <button id="clearBg">Remove image</button>
+        </div>
+
+        <div class="drop">
+          <strong>3. Pick the waveform shape</strong>
+          <small>Change how the wave looks. "Spinning disc" uses your image as the cover.</small>
+          <select id="waveShape">
+            <option value="classic">Classic lines</option>
+            <option value="bars">Rounded bars</option>
+            <option value="line">Smooth line</option>
+            <option value="filled">Filled</option>
+            <option value="dots">Dots</option>
+            <option value="disc">Spinning disc</option>
+          </select>
+        </div>
+
+        <div class="drop">
+          <strong>4. Pick the video format</strong>
+          <small>Choose the size for Reels, Feed or YouTube.</small>
+          <select id="videoFormat">
+            <option value="9x16">9:16 · Reels / Stories / TikTok</option>
+            <option value="4x5">4:5 · Feed portrait</option>
+            <option value="1x1">1:1 · Feed square</option>
+            <option value="16x9">16:9 · YouTube / horizontal</option>
+          </select>
+        </div>
+
+        <div class="fields">
+          <div class="field"><label for="waveColor">Waveform color</label><input id="waveColor" type="color"
+              value="#f2f2f2"></div>
+          <div class="field"><label for="bgColor">Background color</label><input id="bgColor" type="color" value="#080808">
+          </div>
+          <div class="field full"><label for="lineWidth">Wave thickness <span id="widthValue">2
+                px</span></label><input id="lineWidth" type="range" min="1" max="8" value="2"></div>
+          <div class="field full"><label for="speed">Visual velocity <span id="speedValue">1×</span></label><input
+              id="speed" type="range" min="0.5" max="2" step="0.25" value="1"></div>
+          <div class="field full"><label for="title">Small text (optional)</label><input id="title" type="text"
+              placeholder="ex.: MATTHEW / TYPE BEAT"></div>
+        </div>
+
+        <label class="checkrow"><input id="showPlayhead" type="checkbox" checked> Show progress line
+        </label>
+
+        <label class="checkrow"><input id="showText" type="checkbox" checked> Show video text</label>
+      </aside>
+    </div>
+    <footer>WAVELAB · The best tool to create Waveforms. <br>
+      Developed by @mathpereira_01</footer>
+  </div>
+  <audio id="audio" preload="auto"></audio>
+
+  <script src="script.js"> </script>
+
+</body>
+
+</html>
