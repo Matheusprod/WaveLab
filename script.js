@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-    const canvas = $('visual'), ctx = canvas.getContext('2d'), audio = $('audio');
+    const canvas = $('visual'), ctx = canvas.getContext('2d', {alpha: false}), audio = $('audio');
     let peaks = [], peakRate = 200, duration = 0, raf = 0, bgImage = null, bgVersion = 0, bgCache = null, bgCacheKey = '', objectUrl = null;
     let audioCtx = null, sourceNode = null, recordDest = null, recorder = null, chunks = [], recording = false;
     let audioReady = false;
@@ -11,6 +11,7 @@ const $ = id => document.getElementById(id);
       '16x9': {w: 1280, h: 720, label: '16:9', amp: .2, view: 580}
     };
     let vf = FORMATS['9x16'];
+    const FPS = 60; // frame rate of the recorded video
 
     function fmt(s) {if (!Number.isFinite(s)) s = 0; s = Math.max(0, Math.floor(s)); return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');}
     // Smoothed playback clock: audio.currentTime updates in small jumps, which makes the wave tremble.
@@ -30,6 +31,10 @@ const $ = id => document.getElementById(id);
       const cx = w / 2, cy = h / 2, R = Math.min(w, h) * .22, maxLen = R * .5;
       const speed = Number($('speed').value), hasAudio = peaks.length > 0 && duration > 0;
       const TAU = Math.PI * 2;
+      // soft shadow around the disc (a gradient is much cheaper than shadowBlur on every frame)
+      const sg = ctx.createRadialGradient(cx, cy, R * .97, cx, cy, R * 1.1);
+      sg.addColorStop(0, 'rgba(0,0,0,.55)'); sg.addColorStop(1, 'rgba(0,0,0,0)');
+      ctx.fillStyle = sg; ctx.beginPath(); ctx.arc(cx, cy, R * 1.1, 0, TAU); ctx.fill();
       // progress ring (follows the "Show progress line" checkbox)
       ctx.lineCap = 'round'; ctx.lineWidth = 2 * sc;
       ctx.strokeStyle = 'rgba(255,255,255,.12)';
@@ -57,9 +62,7 @@ const $ = id => document.getElementById(id);
       ctx.stroke();
       // disc (rotates with the audio time, so it stops when you pause)
       ctx.save(); ctx.translate(cx, cy); ctx.rotate(now * (Math.PI / 4) * speed);
-      ctx.shadowColor = 'rgba(0,0,0,.6)'; ctx.shadowBlur = 30 * sc;
       ctx.fillStyle = '#101010'; ctx.beginPath(); ctx.arc(0, 0, R, 0, TAU); ctx.fill();
-      ctx.shadowBlur = 0;
       ctx.lineWidth = sc; ctx.strokeStyle = 'rgba(255,255,255,.07)';
       for (let r = R * .5; r < R * .98; r += R * .045) {ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.stroke();}
       const lr = R * .42;
@@ -241,7 +244,7 @@ const $ = id => document.getElementById(id);
         setStatus('This browser doesn’t support audio/video capture. Open the file in an updated Chrome.');
         return;
       }
-      const canvasStream = canvas.captureStream(30);
+      const canvasStream = canvas.captureStream(FPS);
       const audioStream = audio.captureStream();
       const audioTracks = audioStream.getAudioTracks();
       if (!audioTracks.length) {
@@ -253,8 +256,8 @@ const $ = id => document.getElementById(id);
       const candidates = ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4',
         'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
       const mime = candidates.find(m => MediaRecorder.isTypeSupported(m)) || '';
-      // Good quality without heavy files: about 4-5 Mbps video + 192 kbps audio
-      const vbps = Math.round(Math.min(6e6, Math.max(3e6, canvas.width * canvas.height * 4.5)));
+      // Good quality without heavy files: about 5-7 Mbps video at 60 fps + 192 kbps audio
+      const vbps = Math.round(Math.min(8e6, Math.max(4e6, canvas.width * canvas.height * FPS * .1)));
       const opts = {videoBitsPerSecond: vbps, audioBitsPerSecond: 192000};
       if (mime) opts.mimeType = mime;
       chunks = [];
@@ -281,7 +284,7 @@ const $ = id => document.getElementById(id);
       $('download').disabled = true;
       recorder.start(250);
       $('export').textContent = '■ Stop recording';
-      setStatus('Recording video + audio. Click "Stop recording" when youre done.');
+      setStatus('Recording video + audio. Keep this tab open and visible, and click "Stop recording" when you\'re done.');
       if (audio.ended || audio.currentTime >= duration) audio.currentTime = 0;
       try {await audio.play(); $('play').textContent = 'Ⅱ Pausar';}
       catch (e) {setStatus('Allows audio playback in the browser and tries again.'); stopRecording();}
