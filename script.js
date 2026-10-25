@@ -238,6 +238,220 @@ const $ = id => document.getElementById(id);
     let lastVideoUrl = null;
     let lastVideoName = 'wavelab-beat.webm';
 
+    // ---- MP4 FIX START ----
+    // MediaRecorder writes a "fragmented" MP4 (the header has no total duration). Some phones and apps read that wrong
+    // (for example, showing only a couple of seconds). This rewrites it as a regular MP4 with the full duration and the
+    // audio/video in sync. It only moves the data around: no re-encoding, so no quality loss.
+    function fixMp4(input) {
+      const src = input instanceof Uint8Array ? input : new Uint8Array(input);
+      const dv = new DataView(src.buffer, src.byteOffset, src.byteLength);
+      const u32 = o => dv.getUint32(o), i32 = o => dv.getInt32(o);
+      const u64 = o => dv.getUint32(o) * 4294967296 + dv.getUint32(o + 4);
+      const fourcc = o => String.fromCharCode(src[o], src[o + 1], src[o + 2], src[o + 3]);
+      const str = s => Array.from(s, c => c.charCodeAt(0));
+      const u32s = ns => {const o = new Uint8Array(ns.length * 4), d = new DataView(o.buffer); ns.forEach((n, i) => d.setUint32(i * 4, n >>> 0)); return o;};
+      const box = (type, ...parts) => {
+        let len = 8; parts.forEach(p => len += p.length);
+        const out = new Uint8Array(len); out.set(u32s([len]), 0); out.set(str(type), 4);
+        let o = 8; parts.forEach(p => {out.set(p, o); o += p.length;});
+        return out;
+      };
+      const fullBox = (type, ver, flags, ...parts) => box(type, [ver, (flags >> 16) & 255, (flags >> 8) & 255, flags & 255], ...parts);
+      const boxes = (start, end) => {
+        const out = []; let o = start;
+        while (o + 8 <= end) {
+          let size = u32(o), hdr = 8;
+          const type = fourcc(o + 4);
+          if (size === 1) {size = u64(o + 8); hdr = 16;} else if (size === 0) size = end - o;
+          if (size < hdr || o + size > end) break;
+          out.push({type, start: o, hdr, end: o + size, body: o + hdr});
+          o += size;
+        }
+        return out;
+      };
+      const find = (list, t) => list.find(b => b.type === t);
+      const raw = b => src.subarray(b.start, b.end);
+
+      const top = boxes(0, src.length);
+      const moov = find(top, 'moov');
+      if (!moov) throw new Error('moov not found');
+      const moovKids = boxes(moov.body, moov.end);
+      const mvex = find(moovKids, 'mvex');
+      if (!mvex || !top.some(b => b.type === 'moof')) return null; // already a regular MP4
+
+      // --- tracks ---
+      const tracks = {}, order = [];
+      for (const trak of moovKids.filter(b => b.type === 'trak')) {
+        const k = boxes(trak.body, trak.end);
+        const tkhd = find(k, 'tkhd'), mdia = find(k, 'mdia');
+        const id = u32(tkhd.body + (src[tkhd.body] === 1 ? 20 : 12));
+        const mk = boxes(mdia.body, mdia.end);
+        const mdhd = find(mk, 'mdhd'), hdlr = find(mk, 'hdlr'), minf = find(mk, 'minf');
+        const mi = boxes(minf.body, minf.end);
+        const stbl = find(mi, 'stbl');
+        tracks[id] = {
+          id, width: u32(tkhd.end - 8), height: u32(tkhd.end - 4),
+          timescale: u32(mdhd.body + (src[mdhd.body] === 1 ? 20 : 12)), lang: dv.getUint16(mdhd.end - 4),
+          handler: fourcc(hdlr.body + 8), hdlr: raw(hdlr), mediaHdr: find(mi, 'vmhd') || find(mi, 'smhd'), dinf: find(mi, 'dinf'),
+          stsd: find(boxes(stbl.body, stbl.end), 'stsd'),
+          trex: {dur: 0, size: 0, flags: 0}, samples: [], start: 0, end: 0
+        };
+        order.push(id);
+      }
+      if (!order.length) throw new Error('no tracks');
+      for (const trex of boxes(mvex.body, mvex.end).filter(b => b.type === 'trex')) {
+        const t = tracks[u32(trex.body + 4)];
+        if (t) t.trex = {dur: u32(trex.body + 12), size: u32(trex.body + 16), flags: u32(trex.body + 20)};
+      }
+
+      // --- fragments ---
+      for (const moof of top.filter(b => b.type === 'moof')) {
+        let prevEnd = moof.start;
+        for (const traf of boxes(moof.body, moof.end).filter(b => b.type === 'traf')) {
+          const tk = boxes(traf.body, traf.end);
+          const tfhd = find(tk, 'tfhd'), fl = u32(tfhd.body) & 0xffffff;
+          let o = tfhd.body + 4;
+          const t = tracks[u32(o)]; o += 4;
+          let base = null, defDur = t ? t.trex.dur : 0, defSize = t ? t.trex.size : 0, defFlags = t ? t.trex.flags : 0;
+          if (fl & 1) {base = u64(o); o += 8;}
+          if (fl & 2) o += 4;
+          if (fl & 8) {defDur = u32(o); o += 4;}
+          if (fl & 0x10) {defSize = u32(o); o += 4;}
+          if (fl & 0x20) {defFlags = u32(o); o += 4;}
+          if (base === null) base = (fl & 0x20000) ? moof.start : prevEnd;
+          if (!t) continue;
+          const tfdt = find(tk, 'tfdt');
+          if (tfdt) {
+            const val = src[tfdt.body] === 1 ? u64(tfdt.body + 4) : u32(tfdt.body + 4);
+            if (!t.samples.length) {t.start = val; t.end = val;}
+            else if (val !== t.end) { // keep the timeline exactly as recorded
+              const last = t.samples[t.samples.length - 1], nd = Math.max(1, last.dur + (val - t.end));
+              t.end += nd - last.dur; last.dur = nd;
+            }
+          }
+          let ptr = null;
+          for (const trun of tk.filter(b => b.type === 'trun')) {
+            const ver = src[trun.body], f = u32(trun.body) & 0xffffff;
+            let p = trun.body + 4;
+            const count = u32(p); p += 4;
+            let off = ptr;
+            if (f & 1) {off = base + i32(p); p += 4;} else if (off === null) off = base;
+            let firstFlags = null;
+            if (f & 4) {firstFlags = u32(p); p += 4;}
+            for (let i = 0; i < count; i++) {
+              let dur = defDur, size = defSize, sf = defFlags, cto = 0;
+              if (f & 0x100) {dur = u32(p); p += 4;}
+              if (f & 0x200) {size = u32(p); p += 4;}
+              if (f & 0x400) {sf = u32(p); p += 4;} else if (i === 0 && firstFlags !== null) sf = firstFlags;
+              if (f & 0x800) {cto = ver === 1 ? i32(p) : u32(p); p += 4;}
+              t.samples.push({off, size, dur, cto, sync: (sf & 0x10000) === 0});
+              t.end += dur; off += size;
+            }
+            ptr = off;
+          }
+          if (ptr !== null) prevEnd = ptr;
+        }
+      }
+      order.forEach(id => {
+        const t = tracks[id];
+        if (!t.samples.length) throw new Error('track without samples');
+        t.samples.forEach(s => {if (s.off + s.size > src.length) throw new Error('truncated data');});
+      });
+
+      // --- chunks (about 1 s each), interleaved by time so players can stream/seek ---
+      const chunks = [];
+      order.forEach(id => {
+        const t = tracks[id]; let dts = 0, cur = null;
+        t.chunks = [];
+        t.samples.forEach((s, i) => {
+          if (!cur || dts - cur.t0 >= t.timescale) {
+            cur = {t, first: i, count: 0, size: 0, t0: dts, sec: (t.start + dts) / t.timescale};
+            t.chunks.push(cur); chunks.push(cur);
+          }
+          cur.count++; cur.size += s.size; dts += s.dur;
+        });
+      });
+      const orderIdx = id => order.indexOf(id);
+      chunks.sort((a, b) => a.sec - b.sec || orderIdx(a.t.id) - orderIdx(b.t.id));
+      let mdatLen = 0;
+      chunks.forEach(c => {c.mdatOff = mdatLen; mdatLen += c.size;});
+      if (mdatLen + 8 > 4294967295) throw new Error('file too large');
+
+      // --- timing per track ---
+      const MOVIE_TS = 1000;
+      const minStart = Math.min(...order.map(id => tracks[id].start / tracks[id].timescale));
+      let movieDur = 0;
+      order.forEach(id => {
+        const t = tracks[id];
+        t.mediaDur = t.samples.reduce((a, s) => a + s.dur, 0);
+        // If the first picture is shown after its decode time (B-frames), start playback at that picture, like regular MP4s do.
+        let dts0 = 0, minPts = Infinity;
+        t.samples.forEach(s => {minPts = Math.min(minPts, dts0 + s.cto); dts0 += s.dur;});
+        t.mediaTime = Math.max(0, minPts);
+        t.emptyDur = Math.round((t.start / t.timescale - minStart) * MOVIE_TS);
+        t.segDur = Math.max(1, Math.round(t.mediaDur / t.timescale * MOVIE_TS));
+        t.movieDur = t.emptyDur + t.segDur;
+        movieDur = Math.max(movieDur, t.movieDur);
+      });
+
+      const MATRIX = u32s([0x10000, 0, 0, 0, 0x10000, 0, 0, 0, 0x40000000]);
+      const runs = (list) => { // run-length encode a list of numbers into [count, value, ...]
+        const out = [];
+        list.forEach(v => {if (out.length && out[out.length - 1] === v) out[out.length - 2]++; else out.push(1, v);});
+        return out;
+      };
+
+      const buildTrak = (t, mdatBase) => {
+        const isAudio = t.handler === 'soun', isVideo = t.handler === 'vide';
+        const n = t.samples.length;
+        const stts = fullBox('stts', 0, 0, u32s([runs(t.samples.map(s => s.dur)).length / 2]), u32s(runs(t.samples.map(s => s.dur))));
+        const cttsList = t.samples.map(s => s.cto | 0), hasCto = cttsList.some(v => v !== 0);
+        const ctts = hasCto ? fullBox('ctts', cttsList.some(v => v < 0) ? 1 : 0, 0, u32s([runs(cttsList).length / 2]), u32s(runs(cttsList))) : null;
+        const syncIdx = []; t.samples.forEach((s, i) => {if (s.sync) syncIdx.push(i + 1);});
+        const stss = isVideo && syncIdx.length < n ? fullBox('stss', 0, 0, u32s([syncIdx.length]), u32s(syncIdx)) : null;
+        const stscEntries = []; let prev = -1;
+        t.chunks.forEach((c, i) => {if (c.count !== prev) {stscEntries.push(i + 1, c.count, 1); prev = c.count;}});
+        const stsc = fullBox('stsc', 0, 0, u32s([stscEntries.length / 3]), u32s(stscEntries));
+        const stsz = fullBox('stsz', 0, 0, u32s([0, n]), u32s(t.samples.map(s => s.size)));
+        const stco = fullBox('stco', 0, 0, u32s([t.chunks.length]), u32s(t.chunks.map(c => mdatBase + c.mdatOff)));
+        const stbl = box('stbl', raw(t.stsd), stts, ...(ctts ? [ctts] : []), ...(stss ? [stss] : []), stsc, stsz, stco);
+        const mediaHdr = t.mediaHdr ? raw(t.mediaHdr) : (isAudio ? fullBox('smhd', 0, 0, [0, 0, 0, 0]) : fullBox('vmhd', 0, 1, [0, 0, 0, 0, 0, 0, 0, 0]));
+        const dinf = t.dinf ? raw(t.dinf) : box('dinf', fullBox('dref', 0, 0, u32s([1]), fullBox('url ', 0, 1)));
+        const minf = box('minf', mediaHdr, dinf, stbl);
+        const mdhd = fullBox('mdhd', 0, 0, u32s([0, 0, t.timescale, t.mediaDur]), [t.lang >> 8, t.lang & 255], [0, 0]);
+        const mdia = box('mdia', mdhd, t.hdlr, minf);
+        const tkhd = fullBox('tkhd', 0, 7, u32s([0, 0, t.id, 0, t.movieDur, 0, 0, 0, isAudio ? 0x01000000 : 0]), MATRIX, u32s([t.width, t.height]));
+        const elstEntries = [];
+        if (t.emptyDur > 0) elstEntries.push(t.emptyDur, 0xffffffff, 0x00010000);
+        elstEntries.push(t.segDur, t.mediaTime, 0x00010000);
+        const edts = box('edts', fullBox('elst', 0, 0, u32s([elstEntries.length / 3]), u32s(elstEntries)));
+        return box('trak', tkhd, edts, mdia);
+      };
+      const buildMoov = mdatBase => {
+        const mvhd = fullBox('mvhd', 0, 0, u32s([0, 0, MOVIE_TS, movieDur, 0x10000]), [1, 0], [0, 0], u32s([0, 0]), MATRIX,
+          new Uint8Array(24), u32s([Math.max(...order) + 1]));
+        return box('moov', mvhd, ...order.map(id => buildTrak(tracks[id], mdatBase)));
+      };
+
+      const ftyp = box('ftyp', str('isom'), u32s([512]), str('isomiso2avc1mp41'));
+      const moovSize = buildMoov(0).length;
+      const mdatBase = ftyp.length + moovSize + 8;
+      const moovBytes = buildMoov(mdatBase);
+      const out = new Uint8Array(ftyp.length + moovBytes.length + 8 + mdatLen);
+      let pos = 0;
+      out.set(ftyp, pos); pos += ftyp.length;
+      out.set(moovBytes, pos); pos += moovBytes.length;
+      out.set(u32s([mdatLen + 8]), pos); out.set(str('mdat'), pos + 4); pos += 8;
+      chunks.forEach(c => {
+        for (let i = c.first; i < c.first + c.count; i++) {
+          const s = c.t.samples[i];
+          out.set(src.subarray(s.off, s.off + s.size), pos); pos += s.size;
+        }
+      });
+      return out;
+    }
+    // ---- MP4 FIX END ----
+
     async function startRecording() {
       if (!audioReady) return;
       if (!window.MediaRecorder || !canvas.captureStream || !audio.captureStream) {
@@ -264,18 +478,27 @@ const $ = id => document.getElementById(id);
       try {recorder = new MediaRecorder(mixed, opts);}
       catch (e) {setStatus('Cannot start recording onn this browser.'); return;}
       recorder.ondataavailable = e => {if (e.data && e.data.size) chunks.push(e.data);};
-      recorder.onstop = () => {
+      recorder.onstop = async () => {
         const isMp4 = (recorder.mimeType || mime).includes('mp4');
-        lastVideoBlob = new Blob(chunks, {type: recorder.mimeType || mime || 'video/webm'});
+        mixed.getTracks().forEach(t => t.stop());
+        recording = false;
+        $('videoFormat').disabled = false;
+        $('export').textContent = '● Record video';
+        $('play').textContent = audio.paused ? '▶ Play' : 'Ⅱ Pausar';
+        let blob = new Blob(chunks, {type: recorder.mimeType || mime || 'video/webm'});
+        if (isMp4) {
+          setStatus('Finalizing MP4…');
+          try {
+            // Makes the MP4 play with the right length on phones and in social apps
+            const fixed = fixMp4(await blob.arrayBuffer());
+            if (fixed) blob = new Blob([fixed], {type: 'video/mp4'});
+          } catch (err) {console.error('Could not finalize the MP4, keeping the original recording.', err);}
+        }
+        lastVideoBlob = blob;
         if (lastVideoUrl) URL.revokeObjectURL(lastVideoUrl);
         lastVideoUrl = URL.createObjectURL(lastVideoBlob);
         lastVideoName = 'wavelab-beat-' + vf.label.replace(':', 'x') + (isMp4 ? '.mp4' : '.webm');
-        $('videoFormat').disabled = false;
         $('download').disabled = false;
-        mixed.getTracks().forEach(t => t.stop());
-        recording = false;
-        $('export').textContent = '● Record video';
-        $('play').textContent = audio.paused ? '▶ Play' : 'Ⅱ Pausar';
         setStatus(isMp4 ? 'Recording ready (MP4). Click on "Download video" to save it.'
           : 'Recording ready, but this browser only records WebM. Use an updated Chrome or Edge to get MP4.');
       };

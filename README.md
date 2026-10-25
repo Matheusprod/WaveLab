@@ -20,4 +20,4 @@ Projeto simples em HTML, CSS e JavaScript puro. Não precisa instalar dependênc
 ## Observações
 - Feito com HTML, CSS e JavaScript nativos, sem bibliotecas externas.
 - A gravação usa as APIs `MediaRecorder`, `HTMLCanvasElement.captureStream()` e `HTMLMediaElement.captureStream()`. O suporte pode variar conforme o navegador.
-- O vídeo sai direto em MP4 (H.264 + AAC, ~4–5 Mbps) quando o navegador suporta. Em navegadores que não gravam MP4, ele cai para WebM.
+- O vídeo sai direto em MP4 (H.264 + AAC, 60 fps, ~5–7 Mbps) quando o navegador suporta. Em navegadores que não gravam MP4, ele cai para WebM. Ao parar a gravação, o site "finaliza" o MP4 (ajusta o cabeçalho com a duração total), para ele tocar com o tamanho certo no celular e nas redes sociais.
